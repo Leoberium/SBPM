@@ -1,0 +1,328 @@
+---
+title: "scRNA-seq Report"
+author: "Lev Mazaev"
+date: "November 1, 2019"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading libraries:
+
+```{r, message=FALSE, warning=FALSE}
+library(topGO)
+library(dplyr)
+library(gridExtra)
+library(Seurat)
+library(velocyto.R)
+library(SeuratWrappers)
+library(ggplot2)
+library(cowplot)
+library(monocle3)
+```
+
+Loading the data:
+
+```{r}
+load(file = 'hse.object.Rdata')
+data <- sc.object
+```
+
+### Subpopulations discovery
+
+At first let's do PCA:
+
+```{r, fig.width=9, fig.height=6}
+data <- RunPCA(object = data, npcs = 50, verbose = FALSE)
+ElbowPlot(data)
+```
+
+Seems like the majority of true signal is captured in the first 8 PCs.
+
+Now let's do clustering with resolution 0.2:
+
+```{r, message=FALSE, warning=FALSE}
+data <- FindNeighbors(object = data, dims = 1:50, verbose = FALSE)
+data <- FindClusters(object = data, resolution = 0.2, verbose = FALSE)
+table(Idents(data))
+```
+
+We've found 5 clusters. Now let's run t-SNE and UMAP to visualize these clusters:
+
+```{r, message=FALSE, warning=FALSE}
+data <- RunTSNE(object = data, dims = 1:50, verbose = FALSE)
+data <- RunUMAP(object = data, dims = 1:50, verbose = FALSE)
+```
+
+Visualization:
+
+```{r, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+PCAPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+TSNEPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+UMAPPlot(object = data, label = TRUE, label.size = 8)
+```
+
+Now let's try with resolution 1.0:
+
+```{r, message=FALSE, warning=FALSE}
+data <- FindClusters(object = data, resolution = 1.0, verbose = FALSE)
+table(Idents(data))
+```
+
+We've obtained 10 clusters. Visualization:
+
+```{r, fig.width=9, fig.height=6}
+PCAPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+TSNEPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+UMAPPlot(object = data, label = TRUE, label.size = 8)
+```
+
+Now let's use cells field as identity for clustering:
+
+```{r, fig.width=9, fig.height=6}
+Idents(data) <- 'cells'
+PCAPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+TSNEPlot(object = data, label = TRUE, label.size = 8)
+```
+
+```{r, fig.width=9, fig.height=6}
+UMAPPlot(object = data, label = TRUE, label.size = 8)
+```
+
+So, we have 4 cell types in the field 'cells', 5 clusters in the first run of `FindClusters()` (resolution 0.2) and 10 clusters in the second run (resolution 1.0). And here's the t-SNE plot of clusters (resolution 0.2) split by cell type:
+
+```{r, fig.width=9, fig.height=6}
+Idents(data) <- 'integrated_snn_res.0.2'
+TSNEPlot(object = data, label = TRUE, label.size = 8, split.by = 'cells')
+```
+
+### DE of clustering and cells
+
+```{r}
+Idents(data) <- 'integrated_snn_res.1'
+table(Idents(data))
+```
+
+Using the clustering obtained from running `FindClusters()` with resolution equal to 10:
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6, results='hide', fig.keep='all'}
+dec10 <- FindAllMarkers(object = data, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 0.2, verbose = FALSE)
+top2_dec10 <- dec10 %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+DoHeatmap(object = data, features = top2_dec10$gene)
+```
+
+```{r, fig.width=9, fig.height=18}
+FeaturePlot(object = data, features = top2_dec10$gene, pt.size = 0.2, ncol = 2)
+```
+
+Switching back to cells and more different plots:
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6, results='hide', fig.keep='all'}
+Idents(data) <- 'cells'
+dec4 <- FindAllMarkers(object = data, only.pos = TRUE, min.pct = 0.5, logfc.threshold = 0.2, verbose = FALSE)
+top2_dec4 <- dec4 %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+DoHeatmap(object = data, features = top2_dec4$gene)
+```
+
+```{r, fig.width=9, fig.height=12}
+FeaturePlot(object = data, features = top2_dec4$gene, pt.size = 0.2, ncol = 2)
+```
+
+```{r, fig.width=9, fig.height=12}
+VlnPlot(object = data, features = top2_dec4$gene, ncol = 2, pt.size = 0.1)
+```
+
+```{r fig.height=12, fig.width=9, message=FALSE, warning=FALSE}
+RidgePlot(object = data, features = top2_dec4$gene, ncol = 2)
+```
+
+```{r, fig.width=9, fig.height=6}
+DotPlot(object = data, features = top2_dec4$gene)
+```
+
+Also let's perform GO enrichment analysis in cell types 1, 2 and 4 (ignoring 3 because of only 3 DE genes):
+
+```{r, fig.height=12, fig.width=9, message=FALSE, warning=FALSE}
+pval <- dec4$p_val_adj
+names(pval) <- dec4$gene
+gplots <- purrr::map(as.character(c(1, 2, 4)), function(cell) {
+  gl <- pval[dec4$cluster == cell]
+  setGO <- new('topGOdata', description = 'ns', ontology = 'BP',
+             allGenes = gl, geneSel = function(x) return(x < 0.05),
+             nodeSize = 10,
+             annot = annFUN.org,
+             mapping = 'org.Hs.eg.db',
+             ID = 'symbol')
+  resultKS.classic <- runTest(setGO, algorithm = 'classic', statistic = 'ks')
+  goEnrichment <- GenTable(setGO, KS=resultKS.classic, orderBy = 'KS',
+                         topNodes = 20)
+  goEnrichment$ExtTerm <- paste(goEnrichment$GO.ID, goEnrichment$Term, sep = ', ')
+  goEnrichment$KS <- as.numeric(gsub(',', '.', goEnrichment$KS))
+  x <- ggplot(data = goEnrichment, aes(x = reorder(ExtTerm, -KS), y = -log(KS))) +
+    geom_col(aes(fill = -log(KS)), na.rm = TRUE) + coord_flip() +
+    scale_fill_gradient() +
+    xlab('Enrichment') +
+    ylab('Biological process') +
+    ggtitle(paste('GO Enrichment in cell', cell)) +
+    labs(fill = '-log(P-value)')
+  return(x)
+})
+plot_grid(plotlist = gplots, ncol = 1)
+```
+
+### Single cell article
+
+**[A Single-Cell Transcriptome Atlas of the Aging Drosophila Brain](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6086935/)**
+
+In the paper several different scRNA-seq datasets were prepared. 10x Genomics (Drop-Seq) was used for massive single-cell sequencing of all brain cells of fly (data sets DGRP-551 and $w^{1118}$. The method is known for its highest throughput, but it suffers from low resolution and coverage. For identification of rare cell types the authors have used CEL-Seq2 and SMART-Seq2 methods which do not have performance combarable to Drop-Seq, but are more sensitive and give better coverage.
+
+Drop-Seq data was processed using Cell Ranger pipeline (filtering, quality metrics, alignment). CEL-Seq2 cells were demultiplexed with scripts utilizing pysam and their cleaned (fastq-mcf) reads were aligned both with SMART-Seq2 reads using STAR. 
+
+The Seurat pipeline was used to perform normalization, cell clustering by means of SNN graph, t-SNE mapping and differential gene expression analysis. Across many other used computational methods stands out the NNLS regression used for cluster-to-bulk mapping which has shown high similarity between the single-cell and the bulk RNA-seq.
+
+All the data has enabled the authors to claim some facts about gene regulation in fly brain cells which are in correspondence with amassed in previous publications, and integrate the knowledge into a SCope database.
+
+## Advanced task
+
+### Pseudotime trajectory
+
+```{r, message=FALSE, warning=FALSE}
+cds <- cds.graph
+head(colData(cds))
+```
+
+There is no info about batches, so no way to account for batch effect.
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6}
+cds <- preprocess_cds(cds = cds, num_dim = 50)
+plot_pc_variance_explained(cds)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6}
+cds <- reduce_dimension(cds = cds, reduction_method = 'UMAP', preprocess_method = 'PCA')
+plot_cells(cds, color_cells_by = 'original_type', group_label_size = 4)
+```
+
+Clustering cells:
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6}
+cds <- cluster_cells(cds = cds)
+plot_cells(cds, color_cells_by = 'partition', group_label_size = 4)
+```
+
+Learning the trajectory graph:
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6, results='hide', fig.keep='all'}
+cds <- learn_graph(cds = cds)
+plot_cells(cds = cds, color_cells_by = 'original_type', graph_label_size = 4)
+```
+
+Ordering the cells:
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6}
+cds <- order_cells(cds = cds, reduction_method = 'UMAP')
+plot_cells(cds = cds, color_cells_by = 'pseudotime', graph_label_size = 4)
+```
+
+Genes changing along the trajectory:
+
+```{r, fig.height=6, fig.width=9, message=FALSE, warning=FALSE, results='hide'}
+traj_genes <- graph_test(cds = cds, neighbor_graph = 'principal_graph', cores = 8,
+                         verbose = FALSE)
+arr_traj_genes <- arrange(traj_genes, q_value)
+```
+
+```{r}
+head(arr_traj_genes[, 5:6], 10)
+```
+
+
+```{r, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+plot_cells(cds = cds, genes = arr_traj_genes$gene_short_name[1:6], 
+           show_trajectory_graph = FALSE, label_cell_groups = FALSE, 
+           label_leaves = FALSE)
+```
+
+Collecting the trajectory-variable genes into modules (plot is the aggregate module scores within each cell type):
+
+```{r}
+gene_modules <- find_gene_modules(cds[traj_genes$q_value < 0.05 & !is.na(traj_genes$q_value), ])
+cell_groups <- tibble(cell_id = rownames(colData(cds)),
+                      cell_group = colData(cds)$original_type)
+agg_mat <- aggregate_gene_expression(cds = cds, gene_group_df = gene_modules, 
+                                     cell_group_df = cell_groups)
+rownames(agg_mat) <- paste0('Module ', rownames(agg_mat))
+pheatmap::pheatmap(mat = agg_mat, scale = 'column', clustering_method = 'ward.D2')
+```
+
+Plot expression across first 4 modules:
+
+```{r, fig.width=9, fig.height=6}
+plot_cells(cds = cds, genes = gene_modules[gene_modules$module %in% 1:4, ],
+           label_cell_groups = FALSE,
+           show_trajectory_graph = FALSE)
+```
+
+### Analysis of cellular dynamics using RNA velocity
+
+```{r, warning=FALSE}
+bm <- SCTransform(object = bm.integ, assay = 'spliced', verbose = FALSE)
+```
+
+```{r, include=FALSE}
+rm(list = c('bm.integ', 'cds', 'cds.graph', 'sc.object', 'data'))
+```
+
+```{r}
+bm <- RunPCA(object = bm, verbose = FALSE)
+```
+
+```{r}
+bm <- FindNeighbors(object = bm, dims = 1:50, verbose = FALSE)
+bm <- FindClusters(object = bm, verbose = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+bm <- RunUMAP(object = bm, dims = 1:50, verbose = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+bm <- RunVelocity(object = bm, deltaT = 1, kCells = 25, fit.quantile = 0.02, 
+                  verbose = FALSE, ncores = 6)
+```
+
+```{r}
+colors <- (scales::hue_pal())(length(levels(bm)))
+names(colors) <- levels(bm)
+cell_colors <- colors[Idents(bm)]
+names(cell_colors) <- colnames(bm)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=9, fig.height=6, results='hide', fig.keep='all'}
+show.velocity.on.embedding.cor(
+  emb = Embeddings(object = bm, reduction = 'umap'),
+  vel = Tool(object = bm, slot = 'RunVelocity'),
+  n = 200,  scale = 'sqrt',
+  cell.colors = ac(x = cell_colors, alpha = 0.5),
+  cex = 0.8, arrow.scale = 3, show.grid.flow = TRUE,
+  min.grid.cell.mass = 0.5, grid.n = 40, arrow.lwd = 1, 
+  do.par = FALSE, cell.border.alpha = 0.1
+)
+```
