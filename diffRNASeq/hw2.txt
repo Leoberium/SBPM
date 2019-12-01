@@ -1,0 +1,97 @@
+### 1. Все образцы были прокартированы в первом задании. Код:
+
+for file in `ls -1 ./rnaseq`
+do
+        hisat2 -q -p 8 -x mm_index -U ./rnaseq/$file --no-softclip --known-splicesite-infile mss.txt \
+                | samtools sort -@ 8 | samtools view -@ 8 -b > ./bams/${file::-5}sorted.bam
+done
+
+for file in `ls -1 ./bams`
+do
+        echo $file
+        samtools index ./bams/$file
+done
+
+### 2. Сборка транскриптомов
+
+mkdir gtfs
+for file in `ls -1 ./sortedbams/*.bam`
+do
+        file=$(basename $file)
+        echo $file
+        stringtie ./sortedbams/$file -o ./gtfs/${file::-10}gtf -G GRCm38.98.filtered.gtf -p 8
+done
+
+# Общая аннотация
+cd gtfs
+ls -1 *.gtf > gtf_list.txt
+stringtie --merge gtf_list.txt -G ../GRCm38.98.filtered.gtf -o merged.gtf -p 8
+cd ..
+mv gtfs/merged.gtf merged.gtf 
+
+### 3. Перекартирование
+
+hisat2_extract_splice_sites.py merged.gtf > remss.txt
+
+mkdir rebams
+for file in `ls -1 ./rnaseq`
+do
+	hisat2 -q -p 8 -x mm_index -U ./rnaseq/$file --no-softclip --known-splicesite-infile remss.txt \
+		| samtools sort -@ 8 | samtools view -b > ./rebams/${file::-5}sorted.bam
+done
+
+for file in `ls -1 ./rebams`
+do
+        echo $file
+        samtools index ./rebams/$file
+done
+
+### 4. Подсчёт каунтов
+
+# Покрытия
+
+mkdir covs
+for file in `ls -1 ./rebams/*.bam`
+do
+        file=$(basename $file)
+        echo $file
+        stringtie ./rebams/$file -B -e -G merged.gtf -p 8 > ./covs/${file::-10}cov.gtf
+done
+
+# Каунты
+
+touch sample_list.txt
+file in `ls -1 ./covs/*.gtf`
+do
+        echo "$(basename ${file::-8}) $file" >> sample_list.txt
+done
+
+prepDE.py -i sample_list.txt -g ./gene_counts.csv -t ./tx_counts.csv -l 101 # длина рида из samtools stats
+# вылетает с ошибкой, придётся использовать htseq-count
+htseq-count --stranded=no -f bam -m intersection-strict ./rebams/*.bam ./merged.gtf > counts.out
+
+### 5. PCA и heatmap в R
+# heatmap
+x <- read.delim(file = 'counts.out', header = FALSE, comment.char = '#')
+samples <- c('B14.5', 'B15.5', 'B17.5', 'B20', 'B34',
+             'C14.5', 'C15.5', 'C17.5', 'C20', 'C34')
+colnames(x) <- c('gene', samples)
+corr_data <- cor(x[2:11], method = 'spearman')
+heatmap(x = corr_data, symm = TRUE,
+        distfun = function(x) {as.dist(1-x)},
+        revC = TRUE, main = 'Correlation')
+# PCA
+col <- c(rep('blue', 5), rep('red', 5))
+pca <- prcomp(t(x[2:11]))
+dev <- round(pca$sdev / sum(pca$sdev) * 100, 1)
+plot(-pca$x[, 1], -pca$x[, 2], pch = 19, cex = 2,
+     col = col, main = 'PCA',
+     xlab = paste0('PC1 (', dev[1], '%)'), ylab = paste0('PC2 (', dev[2], '%)'))
+text(-pca$x[, 1], -pca$x[, 2], labels = row.names(pca$x), pos = 1)
+
+# Также я сделал эти же графики после фильтрации и нормализации данных
+# Оставим только те гены, у которых хотя бы в одном образце ненулевая экспрессия
+keep <- apply(x[2:11], 1, function(row) sum(row >= 1) >= 1)
+x <- x[keep, ]
+# CPM-нормализация
+x[2:11] <- sweep(x[2:11], 2, 1e-6 * colSums(x[2:11]), '/')
