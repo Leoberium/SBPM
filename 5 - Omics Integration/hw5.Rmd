@@ -1,0 +1,474 @@
+---
+title: "Homework 5"
+author: "Lev Mazaev"
+output: html_notebook
+---
+
+Loading the libraries. For the omics integration I'll use `mixOmics`:
+
+```{r message=FALSE, warning=FALSE}
+library(mixOmics)
+library(tidyverse)
+library(fossil)
+library(umap)
+```
+
+## Data preprocessing
+
+Loading the data:
+
+```{r}
+load('brca.dat')
+```
+
+At first, let's glance at the data.
+
+```{r}
+dim(data$mRNA); dim(data$miRNA); dim(data$proteomics)
+```
+
+So, we have 150 samples. Predictors are:
+- Expression levels of 200 genes in mRNA study
+- Expression levels of 184 miRNAs
+- Abundance of 142 proteins
+
+`Y` is the tissue vector. The mapping from sample to tissue:
+
+```{r}
+sampleToTissue <- tibble(
+  Sample = colnames(data$mRNA),
+  Tissue = Y,
+  Type = as.numeric(Y)
+)
+head(sampleToTissue)
+```
+
+To visualize the data I'll use the boxplots:
+
+```{r}
+boxplotter <- function(mat, title='') {
+  # Function to visualize predictors as boxplots
+  mat <- as_tibble(mat)
+  mat <- mat %>% pivot_longer(cols = everything(),
+                              names_to = 'Sample',
+                              values_to = 'Expression')
+  mat <- mat %>% left_join(y = sampleToTissue, by = 'Sample')
+  ggplot(data = mat, mapping = aes(x = Sample, y = Expression, fill = Tissue)) +
+    geom_boxplot() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    ggtitle(title)
+}
+```
+
+Any missing values in mRNA data?
+
+```{r}
+any(is.na(data$mRNA))
+```
+
+Visualization:
+
+```{r fig.width=12, fig.height=6}
+boxplotter(data$mRNA, 'mRNA')
+```
+
+It's already log-scaled, but seems to be not properly normalized. However, while studying `mixOmics` vignette I've found that the authors of the package are using the same data as an example (`?breast.TCGA`). The description says:
+
+>Each data set was **normalised** and **pre-processed**. For illustrative purposes we drastically **filtered** the data here.
+
+So, there is no need to worry.
+
+Any missing data in miRNA?
+
+```{r}
+any(is.na(data$miRNA))
+```
+
+```{r fig.width=12, fig.height=6}
+boxplotter(data$miRNA, 'miRNA')
+```
+
+And the proteomics data:
+
+Any missing values in proteome data?
+
+```{r}
+any(is.na(data$proteomics))
+```
+
+```{r fig.width=12, fig.height=6}
+boxplotter(data$proteomics, 'Proteomics')
+```
+
+## Single Omics
+
+In this list I'll collect results of Rand index evaluation for each method:
+
+```{r}
+results <- list()
+```
+
+
+### Principal Component Analysis
+
+Now, let's proceed to the clustering. How would the PCA method handle the data?
+
+```{r fig.width=9, fig.height=6}
+pca_mRNA <- pca(t(data$mRNA), ncomp = 5)
+plotIndiv(pca_mRNA, group = sampleToTissue$Tissue,
+          pch = 19, legend = TRUE, title = 'mRNA, PCA comp 1-2',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+In case of mRNA data there is definitely some separation, clusters are visible. But the split is not rigorous enough. Amount of variance explained:
+
+```{r fig.height=6, fig.width=9}
+plot(pca_mRNA)
+```
+
+Now, miRNA data:
+
+```{r fig.width=9, fig.height=6}
+pca_miRNA <- pca(t(data$miRNA), ncomp = 5)
+plotIndiv(pca_miRNA, group = sampleToTissue$Tissue,
+          pch = 19, legend = TRUE, title = 'miRNA, PCA comp 1-2',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+miRNA data is much worse at partitioning than mRNA.
+
+```{r fig.width=9, fig.height=6}
+pca_proteomics <- pca(t(data$proteomics), ncomp = 5)
+plotIndiv(pca_proteomics, group = sampleToTissue$Tissue,
+          pch = 19, legend = TRUE, title = 'Proteomics, PCA comp 1-2',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+Visual partitioning with proteomics data is bad too.
+
+Now let's use `k-means` algorithm to evaluate visual clustering and obtain Rand index for each case (comparing with observed tissue types).
+
+```{r}
+kres <- kmeans(x = pca_mRNA$x, centers = 3, 
+               nstart = 10, iter.max = 100)
+# check if sample vector is the same:
+print(all(names(kres$cluster) == sampleToTissue$Sample))
+```
+
+`k-means` performs differently with each launch, so we will add 100 random starts to obtain guaranteed result. mRNA:
+
+```{r}
+rand_index <- function(mat) {
+  # Function to evaluate Rand index
+  kres <- kmeans(x = mat, centers = 3, 
+               nstart = 100, iter.max = 1000)
+  return(rand.index(kres$cluster, sampleToTissue$Type))
+}
+
+ri <- rand_index(pca_mRNA$x)
+results['PCA on mRNA'] <- ri
+ri
+```
+
+miRNA:
+
+```{r}
+ri <- rand_index(pca_miRNA$x)
+results['PCA on miRNA'] <- ri
+ri
+```
+
+Proteomics:
+
+```{r}
+ri <- rand_index(pca_proteomics$x)
+results['PCA on Proteomics'] <- ri
+ri
+```
+
+According to `k-means` mRNA data performs the best.
+
+### Dimensionality Reduction With UMAP
+
+Now let's try UMAP - a non-linear dimensionality reduction algorithm.
+
+```{r}
+plotUMAP <- function(emb, title) {
+  # Function to visualize UMAP embedding
+  df <- emb$layout
+  colnames(df) <- c('UMAP1', 'UMAP2')
+  df <- as_tibble(df, rownames = 'Sample')
+  df <- df %>% left_join(y = sampleToTissue, by = 'Sample')
+  ggplot(data = df, mapping = aes(x = UMAP1, y = UMAP2, 
+                                         color = Tissue)) +
+    geom_point(size = 2) + ggtitle(title)
+}
+```
+
+mRNA data:
+
+```{r fig.width=9, fig.height=6}
+emb_mRNA <- umap(t(data$mRNA))
+plotUMAP(emb_mRNA, 'mRNA: UMAP')
+```
+
+Partitioning seems to be a lot better than PCA. What's in the case of miRNA?
+
+```{r fig.width=9, fig.height=6}
+emb_miRNA <- umap(t(data$miRNA))
+plotUMAP(emb_miRNA, 'miRNA: UMAP')
+```
+
+Much worse result!
+
+Proteomics:
+
+```{r fig.width=9, fig.height=6}
+emb_proteomics <- umap(t(data$proteomics))
+plotUMAP(emb_proteomics, 'Proteomics: UMAP')
+```
+
+Quite a good partitioning in case of proteomics data.
+
+What would say `k-means`?
+
+```{r}
+ri <- rand_index(emb_mRNA$layout)
+results['UMAP on mRNA'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(emb_miRNA$layout)
+results['UMAP on miRNA'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(emb_proteomics$layout)
+results['UMAP on Proteomics'] <- ri
+ri
+```
+
+In overall UMAP performs better than PCA.
+
+### UMAP + PCA
+
+What would we get if we run UMAP on principal components? Let's see:
+
+```{r fig.width=9, fig.height=6}
+emb_pca_mRNA <- umap(pca_mRNA$x) # only 5 first principal components
+plotUMAP(emb_pca_mRNA, 'mRNA: UMAP on PC')
+```
+
+```{r fig.width=9, fig.height=6}
+emb_pca_miRNA <- umap(pca_miRNA$x)
+plotUMAP(emb_pca_miRNA, 'miRNA: UMAP on PC')
+```
+
+```{r fig.width=9, fig.height=6}
+emb_pca_proteomics <- umap(pca_proteomics$x) # only 5 first components
+plotUMAP(emb_pca_proteomics, 'Proteomics: UMAP on PC')
+```
+
+Visual partioning is convincing, but not perfect. `k-means`:
+
+```{r}
+ri <- rand_index(emb_pca_mRNA$layout)
+results['UMAP + PCA on mRNA'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(emb_pca_miRNA$layout)
+results['UMAP + PCA on miRNA'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(emb_pca_proteomics$layout)
+results['UMAP + PCA on Proteomics'] <- ri
+ri
+```
+
+This combination of methods performs better than single UMAP.
+
+## Multi Omics
+
+### Projection to Latent Structure (PLS)
+
+Now let's use our first integrating method:
+
+```{r fig.width=9, fig.height=6}
+pls_mRNA_miRNA <- pls(X = t(data$mRNA), Y = t(data$miRNA), ncomp = 5)
+plotIndiv(pls_mRNA_miRNA, group = sampleToTissue$Tissue,
+          rep.space = 'XY-variate',
+          pch = 19, legend = TRUE, title = 'mRNA + miRNA, PLS',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+At least visually it's not better than PCA on mRNA. Let's try mRNA + Proteomics:
+
+```{r fig.width=9, fig.height=6}
+pls_mRNA_proteomics <- pls(X = t(data$mRNA), Y = t(data$proteomics), ncomp = 5)
+plotIndiv(pls_mRNA_proteomics, group = sampleToTissue$Tissue,
+          rep.space = 'XY-variate',
+          pch = 19, legend = TRUE, title = 'mRNA + Proteomics, PLS',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+The data looks like 3 vertical bands. miRNA + Proteomics:
+
+```{r fig.width=9, fig.height=6}
+pls_miRNA_proteomics <- pls(X = t(data$miRNA), Y = t(data$proteomics), ncomp = 5)
+plotIndiv(pls_miRNA_proteomics, group = sampleToTissue$Tissue,
+          rep.space = 'XY-variate',
+          pch = 19, legend = TRUE, title = 'miRNA + Proteomics, PLS',
+          legend.title = 'Tissue', ind.names = FALSE)
+```
+
+The results are not promising. For `k-means` we will use XY-variates (average between components of X and Y datasets).
+
+```{r}
+head(pls_mRNA_miRNA$variates$X)
+```
+
+```{r}
+head(pls_mRNA_miRNA$variates$Y)
+```
+
+```{r}
+xy_variate <- function(plsResult) {
+  return((plsResult$variates$X + plsResult$variates$Y) / 2)
+}
+
+head(xy_variate(pls_mRNA_miRNA))
+```
+
+
+```{r}
+ri <- rand_index(xy_variate(pls_mRNA_miRNA))
+results['PLS on mRNA + miRNA'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(xy_variate(pls_mRNA_proteomics))
+results['PLS on mRNA + Proteomics'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(xy_variate(pls_miRNA_proteomics))
+results['PLS on miRNA + Proteomics'] <- ri
+ri
+```
+
+This method performs almost the same as PCA on Single Omics data, but does not outperform UMAP. But what if we run UMAP on results of this method? Let's try mRNA + Proteomics:
+
+```{r fig.height=6, fig.width=9}
+emb_pls_mRNA_protemics <- umap(xy_variate(pls_mRNA_proteomics), min_dist = 0.05, spread = 2)
+plotUMAP(emb_pls_mRNA_protemics, 'mRNA + Proteomics: UMAP on PLS')
+```
+
+The best result so far. `k-means`:
+
+```{r}
+ri <- rand_index(emb_pls_mRNA_protemics$layout)
+results['UMAP + PLS on mRNA + Proteomics'] <- ri
+ri
+```
+
+Dataset integration + UMAP definitely produces the best result.
+
+### Multi-block Discriminant Analysis with DIABLO
+
+Unsupervised N-integration (`block.pls`, `block.spls`). Preparing matrices:
+
+```{r}
+dataT <- lapply(data, t)
+design <- matrix(1, ncol = length(dataT), nrow = length(dataT))
+diag(design) <- 0
+```
+
+```{r fig.width=12, fig.height=9}
+diablo_all <- block.pls(X = dataT, indY = 3, 
+                        ncomp = 5, design = design)
+plotIndiv(diablo_all, group = sampleToTissue$Tissue,
+          pch = 19, legend = TRUE, legend.title = 'Tissue',
+          ind.names = FALSE)
+```
+
+Visual partitioning is poor. Let's take mean of blocks' variates:
+
+```{r fig.width=9, fig.height=6}
+xyz_variate <- (diablo_all$variates$mRNA + 
+                diablo_all$variates$miRNA + 
+                diablo_all$variates$proteomics) / 3
+df <- as_tibble(xyz_variate, rownames = 'Sample')
+df$Tissue <- sampleToTissue$Tissue
+ggplot(data = df, mapping = aes(x = comp1, y = comp2, color = Tissue)) +
+  geom_point(size = 2) + ggtitle('N-integration')
+```
+
+mRNA block and xyz-variate (average of all variates in blocks) look the most promising, let's compute Rand index for each:
+
+```{r}
+ri <- rand_index(diablo_all$variates$mRNA)
+results['DIABLO on mRNA block'] <- ri
+ri
+```
+
+```{r}
+ri <- rand_index(xyz_variate)
+results['DIABLO on averaged blocks'] <- ri
+ri
+```
+
+And let's perform UMAP on both:
+
+```{r fig.height=6, fig.width=9}
+emb_diablo_mRNA <- umap(diablo_all$variates$mRNA, min_dist = 0.05, spread = 2)
+plotUMAP(emb_diablo_mRNA, 'mRNA: UMAP on DIABLO')
+```
+
+```{r}
+ri <- rand_index(emb_diablo_mRNA$layout)
+results['UMAP + DIABLO on mRNA block'] <- ri
+ri
+```
+
+Quite a good result, but still not the best.
+
+```{r fig.height=6, fig.width=9}
+emb_diablo_all <- umap(xyz_variate, min_dist = 0.1, spread = 1)
+plotUMAP(emb_diablo_all, 'mRNA + miRNA + Proteomics: UMAP on DIABLO')
+```
+
+```{r}
+ri <- rand_index(emb_diablo_all$layout)
+results['UMAP + DIABLO on averaged blocks'] <- ri
+ri
+```
+
+Again very good result.
+
+## Summary
+
+All results are present in the table:
+
+```{r}
+df <- enframe(unlist(results))
+colnames(df) <- c('Method', 'Rand index')
+df$Type <- c(rep('Single', 9), rep('Multi', 8))
+df <- arrange(df, desc(df$`Rand index`))
+knitr::kable(df)
+```
+
+And the plot of the best clustering:
+
+```{r fig.height=6, fig.width=9}
+plotUMAP(emb_pls_mRNA_protemics, 'mRNA + Proteomics: UMAP on PLS')
+```
+
+
